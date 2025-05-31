@@ -16,54 +16,54 @@ POPULATION <- "population"
 INDIVIDUAL <- "individual"
 
 
-get_raster_data <- function(locations, move_data, rasters, user_provided_rasters) {
-  logger.info("Getting raster data...")
-  col_names <- unlist(lapply(rasters, names))
+get_raster_data <- function(locations, move_data, rasters,
+                            include_percent_tree_cover, include_elevation) {
+  logger.info("Extracting raster data...")
 
+  if (is_empty(rasters)) {
+    logger.info("No rasters were provided by the user nor did the user select any default environmental variables")
 
-  # Create empty data.table
-  dt <- data.table(matrix(NA, nrow = nrow(locations), ncol = length(col_names)))
-  setnames(dt, col_names)
+    # Create placeholder data.table
+    dt <- data.table(case = move_data$case)
+    col_names <- c()
+  } else {
+    col_names <- unlist(lapply(rasters, names))
 
-  for (i in 1:length(rasters)) {
-    current_raster <- rasters[[i]]
+    # Create empty data.table
+    dt <- data.table(matrix(NA, nrow = nrow(locations), ncol = length(col_names)))
 
-    # Extract values for all layers at once if possible
-    # First check if we need special handling for any layer
-    layer_names <- names(current_raster)
-    special_layers <- layer_names %in% c("tree_canopy_cover", "LC")
+    for (i in 1:length(rasters)) {
+      current_raster <- rasters[[i]]
 
-    if (!any(special_layers) | user_provided_rasters) {
-      # Standard extraction for all layers at once
-      extracted_values <- terra::extract(current_raster, locations)
+      scale_data <- (("percent_tree_cover" %in% names(current_raster)) & include_percent_tree_cover) |
+        (("elevation" %in% names(current_raster)) & include_elevation)
 
-      # Add each column to the result
-      extracted_col_names <- colnames(extracted_values)
-      for (j in 1:length(extracted_col_names)) {
-        lyr_name <- extracted_col_names[j]
-        dt[[lyr_name]] <- extracted_values[[lyr_name]]
-      }
-    } else {
-      # Handle special layers individually
-      for (j in 1:nlyr(current_raster)) {
-        lyr_name <- names(current_raster)[j]
+      if (scale_data) {
+        name <- names(current_raster)[1]
 
-        if (lyr_name == "tree_canopy_cover") {
-          # Extract with bilinear method for continuous data
-          values <- terra::extract(current_raster[[j]], locations, method = "bilinear")
-          dt[[lyr_name]] <- as.numeric(base::scale(values[, 1]))
-        } else if (lyr_name == "LC") {
-          # Handle categorical data
-          values <- terra::extract(current_raster[[j]], locations)
-          dt[[lyr_name]] <- as.factor(values[, 1])
-        } else {
-          # Standard extraction
-          values <- terra::extract(current_raster[[j]], locations)
-          dt[[lyr_name]] <- values[, 1]
+        # Extract with bilinear method for continuous data
+        values <- terra::extract(current_raster, locations, method = "bilinear")
+        dt[[str_interp("${name}_scaled")]] <- as.numeric(base::scale(values[, 1]))
+
+        col_names <- gsub(
+          name,
+          str_interp("${name}_scaled"),
+          col_names
+        )
+      } else {
+        # if not special case, then just extract same as all others
+        extracted_values <- terra::extract(current_raster, locations)
+
+        # Add each column to the result
+        extracted_col_names <- colnames(extracted_values)
+        for (j in 1:length(extracted_col_names)) {
+          lyr_name <- extracted_col_names[j]
+          dt[[lyr_name]] <- extracted_values[[lyr_name]]
         }
       }
     }
   }
+
 
   return(list(
     raster_data = dt,
@@ -74,11 +74,82 @@ get_raster_data <- function(locations, move_data, rasters, user_provided_rasters
 
 
 
+is_categorical_layer <- function(layer,
+                                 max_unique_values = 20,
+                                 sample_size = 1000) {
+  # Initialize result variables
+  is_categorical <- FALSE
+  reason_parts <- character(0)
+
+  # Check if it has category information
+  cat_info <- cats(layer)
+  has_cats <- !is.null(cat_info) && !is.null(cat_info[[1]])
+
+  if (has_cats) {
+    is_categorical <- TRUE
+    reason_parts <- "Has explicit category table"
+    return(list(is_categorical = is_categorical, reasons = reason_parts))
+  }
+
+  # Get data type
+  dt <- datatype(layer)
+
+  # Sample values to avoid memory issues with large rasters
+  if (ncell(layer) > sample_size) {
+    # Create a sample of cell indices
+    set.seed(123) # Use a fixed seed for reproducibility
+    cell_sample <- sample(1:ncell(layer), size = sample_size)
+    # Extract values manually using cell numbers
+    layer_values <- values(layer)[cell_sample]
+  } else {
+    layer_values <- values(layer)
+  }
+
+  # Remove NA values for analysis
+  layer_values <- layer_values[!is.na(layer_values)]
+
+  # If we have too few values after NA removal, assume continuous to be safe
+  if (length(layer_values) < 10) {
+    reason_parts <- "Too few non-NA values to make a determination, assuming continuous"
+    return(list(is_categorical = FALSE, reasons = reason_parts))
+  }
+
+  # Count unique values
+  unique_vals <- unique(layer_values)
+  n_unique <- length(unique_vals)
+
+  # Check for common categorical data types
+  is_integer_type <- grepl("INT", dt)
+
+  # Make the determination based on multiple factors
+  if (n_unique <= max_unique_values) {
+    is_categorical <- TRUE
+    reason_parts <- c(reason_parts, paste("Few unique values:", n_unique, "≤", max_unique_values))
+  }
+
+
+  if (is_integer_type) {
+    reason_parts <- c(reason_parts, paste("Integer data type:", dt))
+    if (!is_categorical) {
+      is_categorical <- is_integer_type
+    }
+  }
+
+  if (!is_categorical) {
+    reason_parts <- c(reason_parts, paste(
+      "Likely continuous data:",
+      "unique values =", n_unique
+    ))
+  }
+
+  return(list(is_categorical = is_categorical, reasons = paste(reason_parts, collapse = "; ")))
+}
+
+
 get_projection_methods <- function(rast_obj,
                                    categorical_method = "near",
                                    continuous_methods = c("bilinear", "cubic"),
                                    max_unique_values = 20,
-                                   integer_threshold = 0.99,
                                    sample_size = 1000) {
   # Ensure input is a SpatRaster
   if (!inherits(rast_obj, "SpatRaster")) {
@@ -103,93 +174,22 @@ get_projection_methods <- function(rast_obj,
     # Use a single layer subset
     current_layer <- rast_obj[[i]]
 
-    # Check if it has category information
-    cat_info <- cats(current_layer)
-    has_cats <- !is.null(cat_info) && !is.null(cat_info[[1]])
+    # Use the helper function to determine if the layer is categorical
+    result <- is_categorical_layer(
+      current_layer,
+      max_unique_values = max_unique_values,
+      sample_size = sample_size
+    )
 
-    if (has_cats) {
-      layer_types[i] <- "categorical"
-      projection_methods[i] <- categorical_method
-      reasons[[i]] <- "Has explicit category table"
-      next # Skip to next layer if categorical is confirmed
-    }
-
-    # Get data type
-    dt <- datatype(current_layer)
-
-    # Sample values to avoid memory issues with large rasters
-    if (ncell(current_layer) > sample_size) {
-      # Create a sample of cell indices
-      set.seed(123 + i) # Different seed for each layer for variety
-      cell_sample <- sample(1:ncell(current_layer), size = sample_size)
-      # Extract values manually using cell numbers
-      layer_values <- values(current_layer)[cell_sample]
-    } else {
-      layer_values <- values(current_layer)
-    }
-
-    # Remove NA values for analysis
-    layer_values <- layer_values[!is.na(layer_values)]
-
-    # If we have too few values after NA removal, assume continuous to be safe
-    if (length(layer_values) < 10) {
-      layer_types[i] <- "continuous"
-      projection_methods[i] <- continuous_methods[1]
-      reasons[[i]] <- "Too few non-NA values to make a determination, assuming continuous"
-      next
-    }
-
-    # Count unique values
-    unique_vals <- unique(layer_values)
-    n_unique <- length(unique_vals)
-
-    # Check if all values are integers
-    integers_proportion <- sum(layer_values == floor(layer_values)) / length(layer_values)
-    all_integers <- integers_proportion >= integer_threshold
-
-    # Check for common categorical data types
-    is_integer_type <- grepl("INT", dt)
-
-    # Make the determination based on multiple factors
-    is_categorical <- FALSE
-    reason_parts <- character(0)
-
-    if (n_unique <= max_unique_values) {
-      is_categorical <- TRUE
-      reason_parts <- c(reason_parts, paste("Few unique values:", n_unique, "≤", max_unique_values))
-    }
-
-    if (all_integers) {
-      reason_parts <- c(reason_parts, paste("Values are integers:", round(integers_proportion * 100, 1), "% integer values"))
-
-      if (!is_categorical) {
-        is_categorical <- all_integers
-      }
-    }
-
-    if (is_integer_type) {
-      reason_parts <- c(reason_parts, paste("Integer data type:", dt))
-
-      if (!is_categorical) {
-        is_categorical <- is_integer_type
-      }
-    }
-
-    # Set the layer type and method based on determination
-    if (is_categorical) {
+    if (result$is_categorical) {
       layer_types[i] <- "categorical"
       projection_methods[i] <- categorical_method
     } else {
       layer_types[i] <- "continuous"
       projection_methods[i] <- continuous_methods[1] # Default to first continuous method
-      reason_parts <- c(reason_parts, paste(
-        "Likely continuous data:",
-        "unique values =", n_unique,
-        ", integer proportion =", round(integers_proportion, 2)
-      ))
     }
 
-    reasons[[i]] <- paste(reason_parts, collapse = "; ")
+    reasons[[i]] <- result$reasons
   }
 
   # Compile results into a data frame
@@ -225,38 +225,56 @@ get_projected_rasters <- function(extent, raster_list, move_data) {
       methods_info <- get_projection_methods(cropped_rast)
 
       layers <- list()
+
       for (i in 1:nlyr(cropped_rast)) {
         layer <- cropped_rast[[i]]
         method <- methods_info$method_vector[i]
-        layers[[i]] <- terra::project(layer, crs(move_data), method = method)
+        layer_type <- methods_info$results_table$type[i]
+        current_layer <- terra::project(layer, crs(move_data), method = method)
+
+        if (layer_type == "categorical") {
+          layers[[i]] <- as.factor(current_layer)
+        } else {
+          layers[[i]] <- current_layer
+        }
       }
 
       proj_rast <- do.call(c, layers)
 
       return(proj_rast)
+    } else {
+      cropped_rast <- terra::crop(rast, extent)
+      layers <- list()
+
+      for (i in 1:nlyr(cropped_rast)) {
+        layer <- cropped_rast[[i]]
+        if (is_categorical_layer(layer)$is_categorical) {
+          layers[[i]] <- as.factor(layer)
+        } else {
+          layers[[i]] <- layer
+        }
+      }
+
+      cropped_rasters <- do.call(c, layers)
+      return(cropped_rasters)
     }
-
-
-    cropped_rast <- terra::crop(rast, extent)
-    return(cropped_rast)
   })
 
   return(rast_list_cropped)
 }
 
 
-get_rasters <- function(extent, raster_file, raster_cat_file, move_data) {
+get_rasters <- function(extent, move_data, include_percent_tree_cover,
+                        include_land_cover_type, include_global_human_modification,
+                        include_elevation) {
   logger.info("Getting rasters...")
-  
-  rast1_path <- getAuxiliaryFilePath("raster_file", fallbackToProvidedFiles = FALSE)
-  rast2_path <- getAuxiliaryFilePath("raster_cat_file", fallbackToProvidedFiles = FALSE)
 
+  rast1_path <- getAuxiliaryFilePath("user_raster_file_1", fallbackToProvidedFiles = FALSE)
+  rast2_path <- getAuxiliaryFilePath("user_raster_file_2", fallbackToProvidedFiles = FALSE)
+
+  rast_list <- list()
 
   if (!is.null(rast1_path) | !is.null(rast2_path)) {
-    # user-provided files
-    user_provided_rasters <- TRUE
-
-    rast_list <- list()
     if (!is.null(rast1_path)) {
       if (file_ext(rast1_path) != "tif") {
         stop("Raster with extension .tif not found, please make sure you uploaded a tif file.")
@@ -274,15 +292,42 @@ get_rasters <- function(extent, raster_file, raster_cat_file, move_data) {
       rast2 <- terra::rast(rast2_path)
       rast_list[[length(rast_list) + 1]] <- rast2
     }
-  } else {
-    rast_lc_tree_canopy <- terra::rast(getAuxiliaryFilePath("raster_lc_tcc_file"), "raster.tif")
-    rast_ghm <- terra::rast(getAuxiliaryFilePath("raster_hm_file"), "raster_hm.tif")
+  }
 
-    rast_list <- list(rast_lc_tree_canopy, rast_ghm)
-    user_provided_rasters <- FALSE
+  if (include_percent_tree_cover) {
+    rast_tree_cover <- terra::rast(getAuxiliaryFilePath("percent_tree_cover"))
+    rast_list[[length(rast_list) + 1]] <- rast_tree_cover
+  }
+
+  if (include_land_cover_type) {
+    rast_landcover_type <- terra::rast(getAuxiliaryFilePath("land_cover_type"))
+    rast_list[[length(rast_list) + 1]] <- rast_landcover_type
   }
 
 
+  if (include_global_human_modification) {
+    rast_ghm <- terra::rast(getAuxiliaryFilePath("global_human_modification"))
+    rast_list[[length(rast_list) + 1]] <- rast_ghm
+  }
+
+  if (include_elevation) {
+    logger.info("Getting elevation raster from AWS...")
+    ext_df <- data.frame(
+      x = c(extent[1], extent[2]),
+      y = c(extent[3], extent[4])
+    )
+
+    rast_elev <- terra::rast(get_elev_raster(ext_df,
+      src = "aws",
+      prj = crs(move_data),
+      z = 7,
+      clip = "bbox",
+      override_size_check = TRUE
+    ))
+
+    names(rast_elev) <- c("elevation")
+    rast_list[[length(rast_list) + 1]] <- rast_elev
+  }
 
   rast_list_proj <- get_projected_rasters(
     extent = extent,
@@ -291,19 +336,25 @@ get_rasters <- function(extent, raster_file, raster_cat_file, move_data) {
   )
 
   return(list(
-    user_provided_rasters = user_provided_rasters,
     rasters = rast_list_proj
   ))
 }
 
 
 
-fit_model <- function(model_df, model_variables, user_provided_rasters = FALSE) {
+fit_model <- function(model_df, model_variables) {
   logger.info("Fitting model...")
   custom_vars <- paste0(model_variables, collapse = " + ")
-  formula_str <- stringr::str_interp(
-    "case ~ delx + dely + distxy + ${custom_vars}"
+
+  custom_vars_str <- ifelse(custom_vars == "",
+    "",
+    stringr::str_interp(" + ${custom_vars}")
   )
+
+  formula_str <- stringr::str_interp(
+    "case ~ delx + dely + distxy${custom_vars_str}"
+  )
+
 
   model_args <- list(
     formula = as.formula(formula_str),
@@ -319,13 +370,18 @@ fit_model <- function(model_df, model_variables, user_provided_rasters = FALSE) 
 
 plot_rasters <- function(rast_list, move_data, scale, track_id_var) {
   logger.info("Plotting rasters...")
+
+  if (is_empty(rast_list)) {
+    logger.info("No rasters to plot")
+    return(NULL)
+  }
+
   plot_list <- list()
   move_vector <- as_spatvector(move_data) |>
     filter(
       case == 1
     )
-  
-  
+
   # Create plots without individual legends for track_id
   for (i in 1:length(rast_list)) {
     raster <- rast_list[[i]]
@@ -334,42 +390,54 @@ plot_rasters <- function(rast_list, move_data, scale, track_id_var) {
       plot <- ggplot() +
         geom_spatraster(data = terra::crop(layer, move_vector)) +
         theme_bw() +
-        scale_fill_hypso_c() +
         theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
         coord_sf(expand = TRUE, datum = sf::st_crs(raster)) +
         ggtitle(names(layer)[1])
-      
+
+
       if (scale == INDIVIDUAL) {
         # Add vectors but hide their legend
         plot <- plot +
-          geom_spatvector(data = move_vector,
-                          aes(color = get(track_id_var)),
-                          show.legend = FALSE)
+          geom_spatvector(
+            data = move_vector,
+            aes(color = get(track_id_var)),
+            show.legend = FALSE
+          )
       } else {
         plot <- plot +
-          geom_spatvector(data = move_vector,
-                          show.legend = FALSE)
+          geom_spatvector(
+            data = move_vector,
+            show.legend = FALSE
+          )
+      }
+
+      if (!is.null(cats(layer)[[1]])) {
+        plot <- plot +
+          scale_fill_discrete(na.value = "transparent")
+      } else {
+        plot <- plot +
+          scale_fill_continuous(na.value = "transparent")
       }
       plot_list[[length(plot_list) + 1]] <- plot
     }
   }
-  
+
   plots_arranged <- ggpubr::ggarrange(
     plotlist = plot_list,
     ncol = 2,
-    nrow = ceiling(length(plot_list)/2)
+    nrow = ceiling(length(plot_list) / 2)
   )
 
-  if(scale == INDIVIDUAL) {
+  if (scale == INDIVIDUAL) {
     # Create legend with better formatting
     legend_only <- ggplot() +
       geom_spatvector(data = move_vector, aes(color = get(track_id_var))) +
       labs(color = track_id_var) +
       theme_minimal()
-    
+
     # Get the legend
     common_legend <- ggpubr::get_legend(legend_only)
-    
+
     # Arrange plots with the legend at the bottom
     final_arrangement <- ggpubr::ggarrange(
       plots_arranged,
@@ -381,19 +449,19 @@ plot_rasters <- function(rast_list, move_data, scale, track_id_var) {
   } else {
     final_arrangement <- plots_arranged
   }
-  
+
   return(final_arrangement)
 }
 
 
 plot_model <- function(model_plot_df, scale, track_id_var) {
   model_plot <- ggplot(model_plot_df) +
-    geom_point(aes(y = term, x = estimate), col = "blue") +
     geom_linerange(aes(
       y = term,
       xmin = conf.low,
       xmax = conf.high
     )) +
+    geom_point(aes(y = term, x = estimate), col = "blue") +
     labs(y = "Variable", x = "Coefficient Estimate") +
     theme_bw()
 
@@ -406,138 +474,16 @@ plot_model <- function(model_plot_df, scale, track_id_var) {
   return(model_plot)
 }
 
-# Optimized get_nonraster_data function with batching and progress bar
-get_elevation_data <- function(locations, move_data) {
-  logger.info("Getting elevation data...")
-  
-  # Convert to data.table directly
-  mut_locations <- locations |>
-    as.data.frame() |>
-    rename(
-      x = X,
-      y = Y
-    )
-
-
-  # Create batches to avoid overwhelming the API
-  batch_size <- 10000
-  n_locations <- nrow(mut_locations)
-  n_batches <- ceiling(n_locations / batch_size)
-
-  # Pre-allocate the result vector - much faster than building a list
-  all_elevations <- numeric(n_locations)
-
-  for (i in 1:n_batches) {
-    start_idx <- (i - 1) * batch_size + 1
-    end_idx <- min(i * batch_size, n_locations)
-
-    logger.info(
-      stringr::str_interp("Getting elevation batch ${i}/${n_batches} (rows ${start_idx}-${end_idx})")
-    )
-
-    # Extract the batch using data.table syntax for speed
-    batch_locations <- mut_locations[start_idx:end_idx, ]
-
-    # Get elevation for this batch
-    batch_elev <- get_elev_point(
-      batch_locations,
-      prj = sf::st_crs(move_data),
-      units = "meters",
-      src = "aws"
-    )$elevation
-
-    # Directly assign to the pre-allocated vector instead of building a list
-    all_elevations[start_idx:end_idx] <- batch_elev
-  }
-
-  # Scale once at the end
-  elev_dat <- base::scale(all_elevations)[, 1]
-
-  return(elev_dat)
-}
-
-
-convert_categorical_cols <- function(df,
-                                     max_unique_values = 20,
-                                     integer_threshold = 0.99,
-                                     include_character = TRUE) {
-  # Input validation
-  if (!is.data.frame(df)) {
-    stop("Input must be a data frame")
-  }
-
-  # Create a copy of the data frame to avoid modifying the original
-  result_df <- df
-
-  # Process each column
-  for (col_name in names(df)) {
-    col_data <- df[[col_name]]
-
-    # Skip columns that are already factors
-    if (is.factor(col_data)) {
-      next
-    }
-
-    # Skip columns that are not numeric or character
-    if (!is.numeric(col_data) && !is.character(col_data)) {
-      next
-    }
-
-    # For character columns, convert to factor if requested
-    if (is.character(col_data)) {
-      if (include_character) {
-        # Check if the number of unique values is reasonable
-        unique_vals <- unique(col_data)
-        n_unique <- length(unique_vals)
-
-        if (n_unique <= max_unique_values && n_unique > 1) {
-          result_df[[col_name]] <- as.factor(col_data)
-        }
-      }
-      next
-    }
-
-    # For numeric columns, apply more checks
-
-    # Remove NA values for analysis
-    non_na_data <- col_data[!is.na(col_data)]
-
-    # If we have too few values after NA removal, skip
-    if (length(non_na_data) < 10) {
-      next
-    }
-
-    # Count unique values
-    unique_vals <- unique(non_na_data)
-    n_unique <- length(unique_vals)
-
-    # Skip binary (0/1) columns
-    is_binary <- n_unique <= 2 && all(unique_vals %in% c(0, 1))
-    if (is_binary) {
-      next
-    }
-
-    # Check if values are integers
-    integers_proportion <- sum(non_na_data == floor(non_na_data)) / length(non_na_data)
-    all_integers <- integers_proportion >= integer_threshold
-
-    # Convert to factor if the column appears categorical
-    if (n_unique <= max_unique_values && n_unique > 1 && all_integers) {
-      result_df[[col_name]] <- as.factor(col_data)
-    }
-  }
-
-  return(result_df)
-}
-
 
 get_model_data <- function(locations, move_data, rasters,
-                           user_provided_rasters, track_id_var) {
+                           include_elevation, include_percent_tree_cover,
+                           track_id_var) {
   raster_data_result <- get_raster_data(
     locations = locations,
     move_data = move_data,
     rasters = rasters,
-    user_provided_rasters = user_provided_rasters
+    include_percent_tree_cover = include_percent_tree_cover,
+    include_elevation = include_elevation
   )
 
   model_data <- raster_data_result$raster_data |>
@@ -553,45 +499,40 @@ get_model_data <- function(locations, move_data, rasters,
 
   model_variables <- raster_data_result$columns
 
-  if (!user_provided_rasters) {
-    # get default elevation data
-    model_data$elevation <- get_elevation_data(locations = locations, move_data = move_data)
-    model_variables <- c(model_variables, "elevation")
-  }
-
-  model_df <- convert_categorical_cols(model_data)
-
   return(list(
-    model_df = model_df,
+    model_df = model_data,
     model_variables = model_variables
   ))
 }
 
 
-rFunction <- function(data, raster_file = NULL, raster_cat_file = NULL,
-                      scale) {
+rFunction <- function(data, scale, user_raster_file_1 = NULL, user_raster_file_2 = NULL,
+                      include_percent_tree_cover = FALSE,
+                      include_land_cover_type = FALSE,
+                      include_global_human_modification = FALSE,
+                      include_elevation = FALSE) {
   track_id_var <- mt_track_id_column(data)
   rast_ext <- ext(as.vector(ext(data)) + c(-0.5, 0.5, -0.5, 0.5))
 
   locations <- sf::st_coordinates(data)
+
   raster_list_result <- get_rasters(
     extent = rast_ext,
-    raster_file = raster_file,
-    raster_cat_file = raster_cat_file,
-    move_data = data
+    move_data = data,
+    include_percent_tree_cover = include_percent_tree_cover,
+    include_land_cover_type = include_land_cover_type,
+    include_global_human_modification = include_global_human_modification,
+    include_elevation = include_elevation
   )
 
   rasters <- raster_list_result$rasters
-
-
-  user_provided_rasters <- raster_list_result$user_provided_rasters
-
 
   model_data <- get_model_data(
     locations = locations,
     move_data = data,
     rasters = rasters,
-    user_provided_rasters = user_provided_rasters,
+    include_elevation = include_elevation,
+    include_percent_tree_cover = include_percent_tree_cover,
     track_id_var = track_id_var
   )
 
@@ -599,8 +540,7 @@ rFunction <- function(data, raster_file = NULL, raster_cat_file = NULL,
   if (scale == POPULATION) {
     model <- fit_model(
       model_df = model_data$model_df,
-      model_variables = model_data$model_variables,
-      user_provided_rasters = user_provided_rasters
+      model_variables = model_data$model_variables
     )
 
     model_plot_df <- broom::tidy(model, conf.int = TRUE)
@@ -609,8 +549,8 @@ rFunction <- function(data, raster_file = NULL, raster_cat_file = NULL,
       nest(nested_data = -!!sym(track_id_var)) |>
       mutate(results = purrr::map(nested_data, function(ind_data_df) {
         model <- fit_model(
-          model_df = ind_data_df, model_variables = model_data$model_variables,
-          user_provided_rasters = user_provided_rasters
+          model_df = ind_data_df,
+          model_variables = model_data$model_variables
         )
         coefs <- broom::tidy(model, conf.int = TRUE)
         return(coefs)
@@ -619,21 +559,6 @@ rFunction <- function(data, raster_file = NULL, raster_cat_file = NULL,
       dplyr::select(-nested_data)
   }
 
-
-  if (!user_provided_rasters) {
-    logger.info("Getting elevation raster...")
-    rasters$elevation <- terra::rast(
-      get_elev_raster(rasters[[1]],
-        src = "aws",
-        prj = st_crs(data),
-        z = 4,
-        clip = "bbox",
-        override_size_check = TRUE
-      )
-    )
-    
-    names(rasters$elevation) <- c("elevation")
-  }
 
   model_plot <- plot_model(
     model_plot_df = model_plot_df,
@@ -653,10 +578,12 @@ rFunction <- function(data, raster_file = NULL, raster_cat_file = NULL,
     width = 9, height = 6, units = "in", dpi = 300
   )
 
-  ggsave(raster_plots,
-    file = paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "raster_plot.jpeg"),
-    width = 12, height = 14
-  )
+  if (!is.null(raster_plots)) {
+    ggsave(raster_plots,
+      file = paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "raster_plot.jpeg"),
+      width = 12, height = 14
+    )
+  }
 
   write.csv(model_plot_df,
     file = paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "rsf_coefficient_output.csv"),
