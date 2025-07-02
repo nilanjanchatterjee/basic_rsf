@@ -68,7 +68,11 @@ The coefficient summary of the model(s) fit when the app was run. Note that if t
 
 *raster_plot.jpeg*
 
-A plot all the rasters from which environmental variables were extracted and used to fit the RSF. Movement trajectories are plotted on each. Note that if `scale` is "Individual", individuals are represented by different colors.
+A plot of all the rasters from which environmental variables were extracted and used to fit the RSF. Movement trajectories are plotted on each. Note that if `scale` is "Individual", individuals are represented by different colors.
+
+*used_background_densities_plot.jpeg*
+
+Contains for each variable in the RSF a plot of the densities (for continuous variables) or proportion (for categorical variables) of used and background locations used to fit the model. Note that if `scale` is "Individual", each panel is the data from one individual and one variable.
 
 ### Settings 
 

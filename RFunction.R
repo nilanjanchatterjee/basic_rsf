@@ -472,13 +472,13 @@ plot_model <- function(model_plot_df, scale, track_id_var) {
 }
 
 
-plot_use_availability_densities <- function(model_data, model_variables,
+plot_used_background_densities <- function(model_data, model_variables,
                                             scale, track_id_var) {
   if (length(model_variables) == 0) {
     return(NULL)
   }
 
-  model_data$case_label <- ifelse(model_data$case == 1, "Used", "Available")
+  model_data$case_label <- ifelse(model_data$case == 1, "Used", "Background")
 
   # Create a list to store individual plots for each variable
   plots <- list()
@@ -492,11 +492,11 @@ plot_use_availability_densities <- function(model_data, model_variables,
       p <- ggplot(plot_data, aes(x = .data[[var]], color = case_label, linetype = case_label)) +
         geom_density(alpha = 0.7, size = 0.8) +
         scale_color_manual(
-          values = c("Used" = "#2E86C1", "Available" = "#E74C3C"),
+          values = c("Used" = "#2E86C1", "Background" = "#E74C3C"),
           name = ""
         ) +
         scale_linetype_manual(
-          values = c("Used" = "solid", "Available" = "dashed"),
+          values = c("Used" = "solid", "Background" = "dashed"),
           name = ""
         ) +
         theme_minimal() +
@@ -542,11 +542,11 @@ plot_use_availability_densities <- function(model_data, model_variables,
       p <- ggplot(plot_data, aes(x = value, y = proportion, fill = case_label, alpha = case_label)) +
         geom_bar(stat = "identity", position = position_dodge(preserve = "single")) +
         scale_fill_manual(
-          values = c("Used" = "#2E86C1", "Available" = "#E74C3C"),
+          values = c("Used" = "#2E86C1", "Background" = "#E74C3C"),
           name = ""
         ) +
         scale_alpha_manual(
-          values = c("Used" = 1, "Available" = 0.7),
+          values = c("Used" = 1, "Background" = 0.7),
           name = ""
         ) +
         theme_minimal() +
@@ -676,7 +676,7 @@ rFunction <- function(data, scale, user_raster_file_1 = NULL, user_raster_file_2
   }
 
 
-  use_availability_plot <- plot_use_availability_densities(
+  used_background_plot <- plot_used_background_densities(
     model_data = model_data$model_df,
     model_variables = model_data$model_variables,
     scale = scale,
@@ -697,13 +697,13 @@ rFunction <- function(data, scale, user_raster_file_1 = NULL, user_raster_file_2
   )
 
 
-  if (!is.null(use_availability_plot)) {
+  if (!is.null(used_background_plot)) {
     height <- 6 * length(model_data$model_variables)
     width <- 5 + 2 * ifelse(
       scale == INDIVIDUAL, length(unique(model_data$model_df[[track_id_var]])), 0
     )
-    ggsave(use_availability_plot,
-      file = paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "use_availability_densities_plot.jpeg"),
+    ggsave(used_background_plot,
+      file = paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "used_background_densities_plot.jpeg"),
       width = width, height = height, units = "in", dpi = 300
     )
   }
