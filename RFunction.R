@@ -72,8 +72,6 @@ get_raster_data <- function(locations, move_data, rasters,
 }
 
 
-
-
 is_categorical_layer <- function(layer,
                                  max_unique_values = 20,
                                  sample_size = 1000) {
@@ -341,7 +339,6 @@ get_rasters <- function(extent, move_data, include_percent_tree_cover,
 }
 
 
-
 fit_model <- function(model_df, model_variables) {
   logger.info("Fitting model...")
   custom_vars <- paste0(model_variables, collapse = " + ")
@@ -475,6 +472,125 @@ plot_model <- function(model_plot_df, scale, track_id_var) {
 }
 
 
+plot_used_background_densities <- function(model_data, model_variables,
+                                            scale, track_id_var) {
+  if (length(model_variables) == 0) {
+    return(NULL)
+  }
+
+  model_data$case_label <- ifelse(model_data$case == 1, "Used", "Background")
+
+  # Create a list to store individual plots for each variable
+  plots <- list()
+
+  for (var in model_variables) {
+    if (is.numeric(model_data[[var]])) {
+      # Handle numeric variables with density plots
+      plot_data <- model_data |>
+        select(all_of(c(var, "case_label", track_id_var)))
+
+      p <- ggplot(plot_data, aes(x = .data[[var]], color = case_label, linetype = case_label)) +
+        geom_density(alpha = 0.7, size = 0.8) +
+        scale_color_manual(
+          values = c("Used" = "#2E86C1", "Background" = "#E74C3C"),
+          name = ""
+        ) +
+        scale_linetype_manual(
+          values = c("Used" = "solid", "Background" = "dashed"),
+          name = ""
+        ) +
+        theme_minimal() +
+        theme(
+          legend.position = "bottom",
+          strip.text = element_text(size = 8),
+          strip.text.x = element_text(margin = margin(t = 5, b = 5)),
+          strip.background = element_rect(fill = "grey95", color = "grey80", size = 0.3),
+          axis.title.x = element_text(size = 16, face = "bold"),
+          axis.title.y = element_text(size = 16),
+          legend.text = element_text(size = 10),
+          panel.spacing = unit(0.8, "lines")
+        ) +
+        labs(
+          x = var,
+          y = "Probability density"
+        )
+
+      # Only facet wrap if INDIVIDUAL scale
+      if (scale == INDIVIDUAL) {
+        p <- p + facet_wrap(~ get(track_id_var), scales = "free")
+      }
+    } else {
+      # Handle factor variables with bar plots
+      if (scale == INDIVIDUAL) {
+        plot_data <- model_data |>
+          select(all_of(c(var, "case_label", track_id_var))) |>
+          group_by(.data[[var]], case_label, !!sym(track_id_var)) |>
+          summarise(count = n(), .groups = "drop") |>
+          group_by(case_label, !!sym(track_id_var)) |>
+          mutate(proportion = count / sum(count)) |>
+          rename(value = 1)
+      } else {
+        plot_data <- model_data |>
+          select(all_of(c(var, "case_label", track_id_var))) |>
+          group_by(.data[[var]], case_label) |>
+          summarise(count = n(), .groups = "drop") |>
+          group_by(case_label) |>
+          mutate(proportion = count / sum(count)) |>
+          rename(value = 1)
+      }
+
+      p <- ggplot(plot_data, aes(x = value, y = proportion, fill = case_label, alpha = case_label)) +
+        geom_bar(stat = "identity", position = position_dodge(preserve = "single")) +
+        scale_fill_manual(
+          values = c("Used" = "#2E86C1", "Background" = "#E74C3C"),
+          name = ""
+        ) +
+        scale_alpha_manual(
+          values = c("Used" = 1, "Background" = 0.7),
+          name = ""
+        ) +
+        theme_minimal() +
+        theme(
+          legend.position = "bottom",
+          strip.text = element_text(size = 8),
+          strip.text.x = element_text(margin = margin(t = 5, b = 5)),
+          strip.background = element_rect(fill = "grey95", color = "grey80", size = 0.3),
+          axis.title.x = element_text(size = 16, face = "bold"),
+          axis.title.y = element_text(size = 16),
+          legend.text = element_text(size = 10),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.spacing = unit(0.8, "lines")
+        ) +
+        labs(
+          x = var,
+          y = "Proportion"
+        )
+
+      # Only facet wrap if INDIVIDUAL scale
+      if (scale == INDIVIDUAL) {
+        p <- p + facet_wrap(~ get(track_id_var), scales = "free")
+      }
+    }
+
+    plots[[var]] <- p
+  }
+
+  # Combine all plots
+  combined_plot <- ggarrange(
+    plotlist = plots,
+    ncol = 1,
+    nrow = length(plots),
+    heights = rep(1, length(plots)),
+    common.legend = TRUE,
+    legend = "bottom",
+    align = "v",
+    vjust = 1
+  )
+
+  return(combined_plot)
+}
+
+
 get_model_data <- function(locations, move_data, rasters,
                            include_elevation, include_percent_tree_cover,
                            track_id_var) {
@@ -560,6 +676,13 @@ rFunction <- function(data, scale, user_raster_file_1 = NULL, user_raster_file_2
   }
 
 
+  used_background_plot <- plot_used_background_densities(
+    model_data = model_data$model_df,
+    model_variables = model_data$model_variables,
+    scale = scale,
+    track_id_var = track_id_var
+  )
+
   model_plot <- plot_model(
     model_plot_df = model_plot_df,
     scale = scale,
@@ -573,11 +696,25 @@ rFunction <- function(data, scale, user_raster_file_1 = NULL, user_raster_file_2
     track_id_var = track_id_var
   )
 
+
+  if (!is.null(used_background_plot)) {
+    height <- 6 * length(model_data$model_variables)
+    width <- 5 + 2 * ifelse(
+      scale == INDIVIDUAL, length(unique(model_data$model_df[[track_id_var]])), 0
+    )
+    ggsave(used_background_plot,
+      file = paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "used_background_densities_plot.jpeg"),
+      width = width, height = height, units = "in", dpi = 300
+    )
+  }
+
+
   ggsave(model_plot,
     file = paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "model_coeffcient_plot.jpeg"),
     width = 9, height = 6, units = "in", dpi = 300
   )
 
+  
   if (!is.null(raster_plots)) {
     ggsave(raster_plots,
       file = paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "raster_plot.jpeg"),

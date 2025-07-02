@@ -16,18 +16,17 @@ test_that("function runs without error with user-provided rasters", {
       user_raster_file_2 = "placeholder"
     ))
   }
-
 })
 
 
 test_that("function runs only with elevation", {
   activate_raster_files(files_to_show = "fallback")
-  
-  
+
+
   for (i in 1:length(SCALES)) {
     scale <- SCALES[i]
     sample_data <- test_data(str_interp("input_${scale}.rds"))
-    
+
     expect_no_error(rFunction(
       data = sample_data,
       scale = scale,
@@ -45,12 +44,12 @@ test_that("function runs only with elevation", {
 
 test_that("function runs without error with user-provided rasters and default variables", {
   activate_raster_files(files_to_show = "user_provided")
-  
-  
+
+
   for (i in 1:length(SCALES)) {
     scale <- SCALES[i]
     sample_data <- test_data(str_interp("input_${scale}.rds"))
-    
+
     expect_no_error(rFunction(
       data = sample_data,
       scale = scale,
@@ -67,12 +66,12 @@ test_that("function runs without error with user-provided rasters and default va
 
 test_that("function runs without error without user-provided rasters and without default variables", {
   activate_raster_files(files_to_show = "fallback")
-  
-  
+
+
   for (i in 1:length(SCALES)) {
     scale <- SCALES[i]
     sample_data <- test_data(str_interp("input_${scale}.rds"))
-    
+
     expect_no_error(rFunction(
       data = sample_data,
       scale = scale,
@@ -85,12 +84,12 @@ test_that("function runs without error without user-provided rasters and without
 
 # test_that("function gives same output as old version without error without user-provided rasters", {
 #  activate_raster_files(files_to_show = "fallback")
-# 
-# 
+#
+#
 #   for (i in 1:length(SCALES)) {
 #     scale <- SCALES[i]
 #     sample_data <- test_data(str_interp("input_${scale}.rds"), thin = FALSE)
-# 
+#
 #     result <- rFunction(
 #       data = sample_data,
 #       scale = scale,
@@ -101,12 +100,12 @@ test_that("function runs without error without user-provided rasters and without
 #       include_global_human_modification = TRUE,
 #       include_elevation = TRUE
 #     )
-# 
+#
 #     new_output <- read_csv(file = here("data/output/rsf_coefficient_output.csv")) |>
 #       arrange(
 #         estimate
 #       )
-# 
+#
 #     old_output <- readRDS(file = here(
 #       str_interp("tests/testthat/data/old_model_${scale}_df.rds")
 #     )) |>
@@ -118,7 +117,7 @@ test_that("function runs without error without user-provided rasters and without
 #       arrange(
 #         estimate
 #       )
-#     
+#
 #     browser()
 #     expect_equal(new_output$term, old_output$term)
 #     expect_equal(new_output$estimate, old_output$estimate)
@@ -142,7 +141,6 @@ test_that("function projects crs for default move data crs and different crs ras
       user_raster_file_2 = NULL
     ))
   }
-
 })
 
 
@@ -162,18 +160,17 @@ test_that("function projects crs for different move data crs and default crs ras
       include_percent_tree_cover = TRUE
     ))
   }
-
 })
 
 
 test_that("function runs without error without user-provided rasters and default variables", {
   activate_raster_files(files_to_show = "fallback")
-  
-  
+
+
   for (i in 1:length(SCALES)) {
     scale <- SCALES[i]
     sample_data <- test_data(str_interp("input_${scale}.rds"))
-    
+
     expect_no_error(rFunction(
       data = sample_data,
       scale = scale,
