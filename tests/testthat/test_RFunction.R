@@ -2,12 +2,27 @@ source(here("tests/testthat/helper.R"))
 
 SCALES <- c("population", "individual")
 
+sample_data <- readRDS(here("data/raw/raster_bug.rds"))
+activate_raster_files(files_to_show = "fallback")
+
+rFunction(
+  data = sample_data,
+  scale = "individual",
+  user_raster_file_1 = "placeholder",
+  user_raster_file_2 = "placeholder",
+  include_percent_tree_cover = T,
+  include_global_human_modification = T,
+  include_elevation = T,
+  include_land_cover_type = F
+)
+
 test_that("function runs without error with user-provided rasters", {
   activate_raster_files(files_to_show = "user_provided")
 
   for (i in 1:length(SCALES)) {
     scale <- SCALES[i]
     sample_data <- test_data(str_interp("input_${scale}.rds"))
+    
 
     expect_no_error(rFunction(
       data = sample_data,

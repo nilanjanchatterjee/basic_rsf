@@ -77,6 +77,13 @@ is_categorical_layer <- function(layer,
                                  sample_size = 1000) {
   # Initialize result variables
   is_categorical <- FALSE
+  
+  lyr_name <- names(layer)[1]
+  if (lyr_name %in% c("percent_tree_cover", "global_human_modification", "elevation")) {
+    print(lyr_name)
+    reason_parts <- "Fallback rasters we know are continuous"
+    return(list(is_categorical = is_categorical, reasons = reason_parts))
+  }
   reason_parts <- character(0)
 
   # Check if it has category information
@@ -385,12 +392,12 @@ plot_rasters <- function(rast_list, move_data, scale, track_id_var) {
     for (j in 1:nlyr(raster)) {
       layer <- raster[[j]]
       plot <- ggplot() +
-        geom_spatraster(data = terra::crop(layer, move_vector)) +
+        geom_spatraster(data = layer) +
         theme_bw() +
         theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
         coord_sf(expand = TRUE, datum = sf::st_crs(raster)) +
         ggtitle(names(layer)[1])
-
+      
 
       if (scale == INDIVIDUAL) {
         # Add vectors but hide their legend
@@ -420,9 +427,7 @@ plot_rasters <- function(rast_list, move_data, scale, track_id_var) {
   }
 
   plots_arranged <- ggpubr::ggarrange(
-    plotlist = plot_list,
-    ncol = 2,
-    nrow = ceiling(length(plot_list) / 2)
+    plotlist = plot_list
   )
 
   if (scale == INDIVIDUAL) {
@@ -622,13 +627,31 @@ get_model_data <- function(locations, move_data, rasters,
 }
 
 
+get_crs_units <- function(spatial_obj) {
+  crs_string <- crs(spatial_obj)
+  # Then look for "+units=" in the string
+  if(grepl("\\+units=", crs_string)) {
+    units <- sub(".*\\+units=([^ ]+).*", "\\1", crs_string)
+  } else {
+    units <- "degree"  # assume geographic if no units specified
+  }
+  
+  return(units)
+}
+
+
 rFunction <- function(data, scale, user_raster_file_1 = NULL, user_raster_file_2 = NULL,
                       include_percent_tree_cover = FALSE,
                       include_land_cover_type = FALSE,
                       include_global_human_modification = FALSE,
                       include_elevation = FALSE) {
   track_id_var <- mt_track_id_column(data)
-  rast_ext <- ext(as.vector(ext(data)) + c(-0.5, 0.5, -0.5, 0.5))
+  
+  units <- get_crs_units(data)
+  
+  # buffer extent based on the map units
+  buffer <- ifelse(units == "degree", 0.005, 0.5) * c(-1, 1, -1, 1)
+  rast_ext <- ext(as.vector(ext(data)) + buffer)
 
   locations <- sf::st_coordinates(data)
 
