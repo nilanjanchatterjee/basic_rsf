@@ -2,12 +2,14 @@ source(here("tests/testthat/helper.R"))
 
 SCALES <- c("population", "individual")
 
+
 test_that("function runs without error with user-provided rasters", {
   activate_raster_files(files_to_show = "user_provided")
 
   for (i in 1:length(SCALES)) {
     scale <- SCALES[i]
     sample_data <- test_data(str_interp("input_${scale}.rds"))
+
 
     expect_no_error(rFunction(
       data = sample_data,

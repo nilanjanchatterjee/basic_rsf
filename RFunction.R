@@ -77,6 +77,12 @@ is_categorical_layer <- function(layer,
                                  sample_size = 1000) {
   # Initialize result variables
   is_categorical <- FALSE
+
+  lyr_name <- names(layer)[1]
+  if (lyr_name %in% c("percent_tree_cover", "global_human_modification", "elevation")) {
+    reason_parts <- "Fallback rasters we know are continuous"
+    return(list(is_categorical = is_categorical, reasons = reason_parts))
+  }
   reason_parts <- character(0)
 
   # Check if it has category information
@@ -384,12 +390,23 @@ plot_rasters <- function(rast_list, move_data, scale, track_id_var) {
     raster <- rast_list[[i]]
     for (j in 1:nlyr(raster)) {
       layer <- raster[[j]]
+
+
+      is_categorical <- is_categorical_layer(layer)$is_categorical
+
       plot <- ggplot() +
-        geom_spatraster(data = terra::crop(layer, move_vector)) +
-        theme_bw() +
-        theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+        geom_spatraster(data = layer, alpha = 0.6) +
+        theme_bw(base_size = 18) +
+        theme(axis.text.x = element_text(angle = 40, hjust = 1)) +
         coord_sf(expand = TRUE, datum = sf::st_crs(raster)) +
         ggtitle(names(layer)[1])
+
+      # Add appropriate scale based on data type
+      if (is_categorical) {
+        plot <- plot + scale_fill_viridis_d(option = "turbo", na.value = "transparent")
+      } else {
+        plot <- plot + scale_fill_viridis_c(na.value = "transparent")
+      }
 
 
       if (scale == INDIVIDUAL) {
@@ -408,21 +425,20 @@ plot_rasters <- function(rast_list, move_data, scale, track_id_var) {
           )
       }
 
-      if (!is.null(cats(layer)[[1]])) {
-        plot <- plot +
-          scale_fill_discrete(na.value = "transparent")
-      } else {
-        plot <- plot +
-          scale_fill_continuous(na.value = "transparent")
-      }
+      plot <- plot +
+        scale_color_viridis_d(option = "plasma")
+
       plot_list[[length(plot_list) + 1]] <- plot
     }
   }
 
+
+  ncol <- ifelse(length(plot_list) < 4, length(plot_list), 2)
+  nrow <- ceiling(length(plot_list) / ncol)
   plots_arranged <- ggpubr::ggarrange(
     plotlist = plot_list,
-    ncol = 2,
-    nrow = ceiling(length(plot_list) / 2)
+    ncol = ncol,
+    nrow = nrow
   )
 
   if (scale == INDIVIDUAL) {
@@ -430,22 +446,37 @@ plot_rasters <- function(rast_list, move_data, scale, track_id_var) {
     legend_only <- ggplot() +
       geom_spatvector(data = move_vector, aes(color = get(track_id_var))) +
       labs(color = track_id_var) +
-      theme_minimal()
+      scale_color_viridis_d(option = "plasma") +
+      theme_minimal(base_size = 18) +
+      guides(color = guide_legend(
+        direction = ifelse(ncol <= 2, "vertical", "horizontal"),
+        ncol = ncol,
+        override.aes = list(size = 4)
+      ))
+
 
     # Get the legend
     common_legend <- ggpubr::get_legend(legend_only)
 
     # Arrange plots with the legend at the bottom
     final_arrangement <- ggpubr::ggarrange(
-      plots_arranged,
-      common_legend,
+      plotlist = list(plots_arranged, common_legend),
       ncol = 1,
       nrow = 2,
-      heights = c(0.9, 0.1) # 90% for plots, 10% for legend
+      heights = c(0.7, 0.1) # 90% for plots, 10% for legend
     )
   } else {
     final_arrangement <- plots_arranged
   }
+
+  height <- ifelse(scale == INDIVIDUAL, 4, 0) +
+    (6 * nrow)
+  width <- 6 * ncol
+
+  ggsave(paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "raster_plot.jpeg"),
+    height = height, width = width, units = "in"
+  )
+
 
   return(final_arrangement)
 }
@@ -468,12 +499,17 @@ plot_model <- function(model_plot_df, scale, track_id_var) {
       facet_wrap(~ get(track_id_var), scales = "free")
   }
 
+  ggsave(paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "model_coeffcient_plot.jpeg"),
+    plot = model_plot,
+    width = 9, height = 6, units = "in", dpi = 300
+  )
+
   return(model_plot)
 }
 
 
 plot_used_background_densities <- function(model_data, model_variables,
-                                            scale, track_id_var) {
+                                           scale, track_id_var) {
   if (length(model_variables) == 0) {
     return(NULL)
   }
@@ -587,6 +623,18 @@ plot_used_background_densities <- function(model_data, model_variables,
     vjust = 1
   )
 
+
+  height <- 6 * length(model_variables)
+  width <- 5 + 2 * ifelse(
+    scale == INDIVIDUAL, length(unique(model_data[[track_id_var]])), 0
+  )
+
+  ggsave(paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "used_background_densities_plot.jpeg"),
+    plot = combined_plot,
+    width = width, height = height, units = "in"
+  )
+
+
   return(combined_plot)
 }
 
@@ -622,13 +670,31 @@ get_model_data <- function(locations, move_data, rasters,
 }
 
 
+get_crs_units <- function(spatial_obj) {
+  crs_string <- crs(spatial_obj)
+  # Then look for "+units=" in the string
+  if (grepl("\\+units=", crs_string)) {
+    units <- sub(".*\\+units=([^ ]+).*", "\\1", crs_string)
+  } else {
+    units <- "degree" # assume geographic if no units specified
+  }
+
+  return(units)
+}
+
+
 rFunction <- function(data, scale, user_raster_file_1 = NULL, user_raster_file_2 = NULL,
                       include_percent_tree_cover = FALSE,
                       include_land_cover_type = FALSE,
                       include_global_human_modification = FALSE,
                       include_elevation = FALSE) {
   track_id_var <- mt_track_id_column(data)
-  rast_ext <- ext(as.vector(ext(data)) + c(-0.5, 0.5, -0.5, 0.5))
+
+  units <- get_crs_units(data)
+
+  # buffer extent based on the map units
+  buffer <- ifelse(units == "degree", 0.005, 0.5) * c(-1, 1, -1, 1)
+  rast_ext <- ext(as.vector(ext(data)) + buffer)
 
   locations <- sf::st_coordinates(data)
 
@@ -676,51 +742,26 @@ rFunction <- function(data, scale, user_raster_file_1 = NULL, user_raster_file_2
   }
 
 
-  used_background_plot <- plot_used_background_densities(
+  plot_used_background_densities(
     model_data = model_data$model_df,
     model_variables = model_data$model_variables,
     scale = scale,
     track_id_var = track_id_var
   )
 
-  model_plot <- plot_model(
+  plot_model(
     model_plot_df = model_plot_df,
     scale = scale,
     track_id_var = track_id_var
   )
 
-  raster_plots <- plot_rasters(
+  plot_rasters(
     rast_list = rasters,
     move_data = data,
     scale = scale,
     track_id_var = track_id_var
   )
 
-
-  if (!is.null(used_background_plot)) {
-    height <- 6 * length(model_data$model_variables)
-    width <- 5 + 2 * ifelse(
-      scale == INDIVIDUAL, length(unique(model_data$model_df[[track_id_var]])), 0
-    )
-    ggsave(used_background_plot,
-      file = paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "used_background_densities_plot.jpeg"),
-      width = width, height = height, units = "in", dpi = 300
-    )
-  }
-
-
-  ggsave(model_plot,
-    file = paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "model_coeffcient_plot.jpeg"),
-    width = 9, height = 6, units = "in", dpi = 300
-  )
-
-  
-  if (!is.null(raster_plots)) {
-    ggsave(raster_plots,
-      file = paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "raster_plot.jpeg"),
-      width = 12, height = 14
-    )
-  }
 
   write.csv(model_plot_df,
     file = paste0(Sys.getenv(x = "APP_ARTIFACTS_DIR", "/tmp/"), "rsf_coefficient_output.csv"),
